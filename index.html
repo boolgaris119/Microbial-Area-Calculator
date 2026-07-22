@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>미생물 배양 면적 계산기</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #089969; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; margin-bottom: 20px; }
+        
+        .top-bar { display: flex; justify-content: space-between; align-items: center; background: #eef2f5; padding: 15px; border-radius: 8px; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+        .guide-text { font-size: 0.9em; color: #2e7d32; font-weight: bold; }
+        .threshold-input { display: flex; align-items: center; gap: 8px; font-weight: bold; color: #4a5568; }
+        .threshold-input input { width: 70px; padding: 5px; font-size: 1em; text-align: center; border: 1px solid #ccc; border-radius: 4px; }
+
+        .canvas-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+        .canvas-box { text-align: center; background: #fafafa; padding: 10px; border-radius: 8px; border: 1px solid #ddd; }
+        canvas { max-width: 100%; height: auto; border-radius: 4px; background: #333; cursor: crosshair; }
+        
+        .results { margin-top: 20px; padding: 15px; background: #e8f5e9; border-radius: 8px; border-left: 5px solid #4caf50; }
+        .results h3 { margin: 0 0 10px 0; color: #2e7d32; }
+        .metric-grid { display: flex; gap: 20px; font-size: 1.1em; flex-wrap: wrap; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1> 미생물 배양 면적 계산기</h1>
+    
+    <div class="top-bar">
+        <div>
+            <input type="file" id="imageLoader" accept="image/*">
+        </div>
+        
+        <div class="threshold-input">
+            <label for="thresholdInput">검출 민감도(0~255):</label>
+            <input type="number" id="thresholdInput" min="0" max="255" value="120">
+        </div>
+    </div>
+
+    <div class="canvas-container">
+        <div class="canvas-box">
+            <h4>원본 이미지</h4>
+            <canvas id="canvasOriginal"></canvas>
+        </div>
+        <div class="canvas-box">
+            <h4>미생물 영역 </h4>
+            <canvas id="canvasProcessed"></canvas>
+        </div>
+    </div>
+
+    <div class="results">
+        <h3> 분석 결과</h3>
+        <div class="metric-grid">
+            <div>접시 내부 총 면적: <span id="totalDishPixels">0</span> px</div>
+            <div>미생물 점유 면적: <span id="microbePixels">0</span> px</div>
+            <div>면적 점유율: <span id="coveragePercent">0.00 %</span></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const imageLoader = document.getElementById('imageLoader');
+    const canvasOrig = document.getElementById('canvasOriginal');
+    const canvasProc = document.getElementById('canvasProcessed');
+    const ctxOrig = canvasOrig.getContext('2d');
+    const ctxProc = canvasProc.getContext('2d');
+    const thresholdInput = document.getElementById('thresholdInput');
+
+    let img = new Image();
+    
+    // 원 선택 상태 변수 (중심 X, Y, 반지름)
+    let circle = { cx: 0, cy: 0, r: 0 };
+    let isDragging = false;
+    let startX = 0, startY = 0;
+
+    imageLoader.addEventListener('change', handleImage, false);
+    thresholdInput.addEventListener('change', processImage);
+    thresholdInput.addEventListener('keyup', processImage);
+
+    // 마우스 이벤트 등록 (드래그로 원 그리기)
+    canvasOrig.addEventListener('mousedown', (e) => {
+        if (!img.src) return;
+        const rect = canvasOrig.getBoundingClientRect();
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+        isDragging = true;
+    });
+
+    canvasOrig.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const rect = canvasOrig.getBoundingClientRect();
+        const currentX = e.clientX - rect.left;
+        const currentY = e.clientY - rect.top;
+
+        // 드래그한 중심점과 반지름 계산
+        circle.cx = (startX + currentX) / 2;
+        circle.cy = (startY + currentY) / 2;
+        circle.r = Math.sqrt((currentX - startX) ** 2 + (currentY - startY) ** 2) / 2;
+
+        processImage();
+    });
+
+    canvasOrig.addEventListener('mouseup', () => { isDragging = false; });
+    canvasOrig.addEventListener('mouseleave', () => { isDragging = false; });
+
+    function handleImage(e) {
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            img = new Image();
+            img.onload = function() {
+                const maxDim = 600;
+                let scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
+                canvasOrig.width = img.width * scale;
+                canvasOrig.height = img.height * scale;
+                canvasProc.width = canvasOrig.width;
+                canvasProc.height = canvasOrig.height;
+
+                // 기본 원 설정 (중앙에 기본 크기로 선배치)
+                const w = canvasOrig.width;
+                const h = canvasOrig.height;
+                circle = { cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.42 };
+
+                processImage();
+            }
+            img.src = event.target.result;
+        }
+        reader.readAsDataURL(e.target.files[0]);
+    }
+
+    function processImage() {
+        if (!img.src) return;
+
+        const w = canvasOrig.width;
+        const h = canvasOrig.height;
+
+        // 1. 원본 그리기
+        ctxOrig.drawImage(img, 0, 0, w, h);
+
+        const thresVal = parseInt(thresholdInput.value) || 120;
+
+        // 원본에 ROI 원 표시
+        if (circle.r > 0) {
+            ctxOrig.strokeStyle = '#00ff00';
+            ctxOrig.lineWidth = 2;
+            ctxOrig.beginPath();
+            ctxOrig.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
+            ctxOrig.stroke();
+        }
+
+        // 2. 픽셀 데이터 처리
+        const imgData = ctxOrig.getImageData(0, 0, w, h);
+        const data = imgData.data;
+        const procImgData = ctxProc.createImageData(w, h);
+        const procData = procImgData.data;
+
+        let totalDishPixels = 0;
+        let microbePixels = 0;
+
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = (y * w + x) * 4;
+                const dist = Math.sqrt((x - circle.cx) ** 2 + (y - circle.cy) ** 2);
+
+                if (dist <= circle.r) {
+                    totalDishPixels++;
+
+                    const rCol = data[idx];
+                    const gCol = data[idx + 1];
+                    const bCol = data[idx + 2];
+                    const gray = 0.299 * rCol + 0.587 * gCol + 0.114 * bCol;
+
+                    if (gray > thresVal) {
+                        microbePixels++;
+                        procData[idx] = 255;
+                        procData[idx + 1] = 50;
+                        procData[idx + 2] = 50;
+                        procData[idx + 3] = 255;
+                    } else {
+                        procData[idx] = 40;
+                        procData[idx + 1] = 40;
+                        procData[idx + 2] = 40;
+                        procData[idx + 3] = 255;
+                    }
+                } else {
+                    procData[idx] = 0;
+                    procData[idx + 1] = 0;
+                    procData[idx + 2] = 0;
+                    procData[idx + 3] = 255;
+                }
+            }
+        }
+
+        ctxProc.putImageData(procImgData, 0, 0);
+
+        // 결과 계산 및 업데이트
+        const percent = totalDishPixels > 0 ? (microbePixels / totalDishPixels) * 100 : 0;
+        document.getElementById('totalDishPixels').innerText = totalDishPixels.toLocaleString();
+        document.getElementById('microbePixels').innerText = microbePixels.toLocaleString();
+        document.getElementById('coveragePercent').innerText = percent.toFixed(2) + " %";
+    }
+</script>
+
+</body>
+</html>
