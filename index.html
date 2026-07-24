@@ -3,20 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>미생물 배양 면적 계산기</title>
+    <title>AI 미생물 배양 면적 자동 계산기 (Roboflow API)</title>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #089969; margin: 0; padding: 20px; color: #333; }
         .container { max-width: 1100px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         h1 { text-align: center; color: #2c3e50; margin-bottom: 20px; }
         
         .top-bar { display: flex; justify-content: space-between; align-items: center; background: #eef2f5; padding: 15px; border-radius: 8px; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
-        .guide-text { font-size: 0.9em; color: #2e7d32; font-weight: bold; }
-        .threshold-input { display: flex; align-items: center; gap: 8px; font-weight: bold; color: #4a5568; }
-        .threshold-input input { width: 70px; padding: 5px; font-size: 1em; text-align: center; border: 1px solid #ccc; border-radius: 4px; }
+        .controls { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
+        
+        .status-badge { font-weight: bold; background: #fff; padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 0.9em; }
+        
+        .ai-btn { background-color: #27ae60; color: white; border: none; padding: 10px 20px; font-weight: bold; font-size: 1em; border-radius: 6px; cursor: pointer; transition: 0.2s; }
+        .ai-btn:hover { background-color: #219150; }
+        .ai-btn:disabled { background-color: #95a5a6; cursor: not-allowed; }
+
+        .status-text { font-size: 0.85em; font-weight: bold; color: #7f8c8d; }
 
         .canvas-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
         .canvas-box { text-align: center; background: #fafafa; padding: 10px; border-radius: 8px; border: 1px solid #ddd; }
-        canvas { max-width: 100%; height: auto; border-radius: 4px; background: #333; cursor: crosshair; }
+        canvas { max-width: 100%; height: auto; border-radius: 4px; background: #333; }
         
         .results { margin-top: 20px; padding: 15px; background: #e8f5e9; border-radius: 8px; border-left: 5px solid #4caf50; }
         .results h3 { margin: 0 0 10px 0; color: #2e7d32; }
@@ -26,32 +33,36 @@
 <body>
 
 <div class="container">
-    <h1> 미생물 배양 면적 계산기</h1>
+    <h1>AI 미생물 배양 면적 자동 계산기</h1>
     
     <div class="top-bar">
         <div>
             <input type="file" id="imageLoader" accept="image/*">
         </div>
         
-        <div class="threshold-input">
-            <label for="thresholdInput">검출 민감도(0~255):</label>
-            <input type="number" id="thresholdInput" min="0" max="255" value="120">
+        <div class="controls">
+            <div class="status-badge">
+                <span>접시 감지 상태: </span>
+                <span id="dishStatus" style="color: #e67e22;">이미지 대기 중</span>
+            </div>
+            <button id="aiBtn" class="ai-btn" onclick="runAIPrediction()" disabled> AI 자동 분석 실행</button>
+            <span id="modelStatus" class="status-text">이미지를 업로드하세요</span>
         </div>
     </div>
 
     <div class="canvas-container">
         <div class="canvas-box">
-            <h4>원본 이미지</h4>
+            <h4>원본 이미지 (페트리 접시 자동 감지)</h4>
             <canvas id="canvasOriginal"></canvas>
         </div>
         <div class="canvas-box">
-            <h4>미생물 영역 </h4>
+            <h4>AI 미생물 영역 검출 결과</h4>
             <canvas id="canvasProcessed"></canvas>
         </div>
     </div>
 
     <div class="results">
-        <h3> 분석 결과</h3>
+        <h3>분석 결과</h3>
         <div class="metric-grid">
             <div>접시 내부 총 면적: <span id="totalDishPixels">0</span> px</div>
             <div>미생물 점유 면적: <span id="microbePixels">0</span> px</div>
@@ -61,49 +72,29 @@
 </div>
 
 <script>
+    // 🚀 네가 직접 찾은 API 정보 세팅 완료!
+    const ROBOFLOW_API_KEY = "tbrOzXep5FeLDVhIDMl1"; 
+    const MODEL_ENDPOINT = "microbe-gnwb8/6";
+
     const imageLoader = document.getElementById('imageLoader');
     const canvasOrig = document.getElementById('canvasOriginal');
     const canvasProc = document.getElementById('canvasProcessed');
     const ctxOrig = canvasOrig.getContext('2d');
     const ctxProc = canvasProc.getContext('2d');
-    const thresholdInput = document.getElementById('thresholdInput');
+    const aiBtn = document.getElementById('aiBtn');
+    const modelStatus = document.getElementById('modelStatus');
+    const dishStatus = document.getElementById('dishStatus');
 
     let img = new Image();
-    
-    // 원 선택 상태 변수 (중심 X, Y, 반지름)
+    let isOpenCvReady = false;
     let circle = { cx: 0, cy: 0, r: 0 };
-    let isDragging = false;
-    let startX = 0, startY = 0;
+
+    function onOpenCvReady() {
+        isOpenCvReady = true;
+        console.log("✅ OpenCV.js 로드 완료!");
+    }
 
     imageLoader.addEventListener('change', handleImage, false);
-    thresholdInput.addEventListener('change', processImage);
-    thresholdInput.addEventListener('keyup', processImage);
-
-    // 마우스 이벤트 등록 (드래그로 원 그리기)
-    canvasOrig.addEventListener('mousedown', (e) => {
-        if (!img.src) return;
-        const rect = canvasOrig.getBoundingClientRect();
-        startX = e.clientX - rect.left;
-        startY = e.clientY - rect.top;
-        isDragging = true;
-    });
-
-    canvasOrig.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        const rect = canvasOrig.getBoundingClientRect();
-        const currentX = e.clientX - rect.left;
-        const currentY = e.clientY - rect.top;
-
-        // 드래그한 중심점과 반지름 계산
-        circle.cx = (startX + currentX) / 2;
-        circle.cy = (startY + currentY) / 2;
-        circle.r = Math.sqrt((currentX - startX) ** 2 + (currentY - startY) ** 2) / 2;
-
-        processImage();
-    });
-
-    canvasOrig.addEventListener('mouseup', () => { isDragging = false; });
-    canvasOrig.addEventListener('mouseleave', () => { isDragging = false; });
 
     function handleImage(e) {
         const reader = new FileReader();
@@ -117,30 +108,168 @@
                 canvasProc.width = canvasOrig.width;
                 canvasProc.height = canvasOrig.height;
 
-                // 기본 원 설정 (중앙에 기본 크기로 선배치)
-                const w = canvasOrig.width;
-                const h = canvasOrig.height;
-                circle = { cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.42 };
+                ctxOrig.drawImage(img, 0, 0, canvasOrig.width, canvasOrig.height);
+                detectPetriDishAuto();
 
-                processImage();
+                aiBtn.disabled = false;
+                modelStatus.innerText = "분석 준비 완료";
+                modelStatus.style.color = "#27ae60";
             }
             img.src = event.target.result;
         }
         reader.readAsDataURL(e.target.files[0]);
     }
 
-    function processImage() {
+    function detectPetriDishAuto() {
+        const w = canvasOrig.width;
+        const h = canvasOrig.height;
+
+        if (!isOpenCvReady || typeof cv === 'undefined') {
+            circle = { cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.45 };
+            dishStatus.innerText = "기본 범위 적용 (OpenCV 대기중)";
+            drawCircleOverlay();
+            return;
+        }
+
+        try {
+            let src = cv.imread(canvasOrig);
+            let gray = new cv.Mat();
+            cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+            cv.medianBlur(gray, gray, 5);
+
+            let circles = new cv.Mat();
+            cv.HoughCircles(gray, circles, cv.HOUGH_GRADIENT, 1, gray.rows / 8, 100, 30, Math.min(w, h) * 0.25, Math.min(w, h) * 0.5);
+
+            if (circles.cols > 0) {
+                let cx = circles.data32F[0];
+                let cy = circles.data32F[1];
+                let r = circles.data32F[2];
+
+                circle = { cx, cy, r };
+                dishStatus.innerText = "자동 감지 완료";
+                dishStatus.style.color = "#27ae60";
+            } else {
+                circle = { cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.45 };
+                dishStatus.innerText = "감지 실패 (기본 범위 적용)";
+                dishStatus.style.color = "#e67e22";
+            }
+
+            src.delete(); gray.delete(); circles.delete();
+        } catch (err) {
+            circle = { cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.45 };
+        }
+
+        drawCircleOverlay();
+    }
+
+    async function runAIPrediction() {
         if (!img.src) return;
+
+        modelStatus.innerText = "Roboflow AI 분석 중...";
+        aiBtn.disabled = true;
 
         const w = canvasOrig.width;
         const h = canvasOrig.height;
 
-        // 1. 원본 그리기
         ctxOrig.drawImage(img, 0, 0, w, h);
+        drawCircleOverlay();
 
-        const thresVal = parseInt(thresholdInput.value) || 120;
+        try {
+            // 1. 이미지를 Base64 인코딩하여 API 전송
+            const base64Image = canvasOrig.toDataURL('image/jpeg', 0.85).split(',')[1];
 
-        // 원본에 ROI 원 표시
+            const response = await fetch(`https://detect.roboflow.com/${MODEL_ENDPOINT}?api_key=${ROBOFLOW_API_KEY}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                body: base64Image
+            });
+
+            const result = await response.json();
+            console.log("Roboflow API 응답 데이터:", result);
+
+            if (result.error) {
+                throw new Error(result.error.message || "API 호출 실패");
+            }
+
+        
+            const maskCanvas = document.createElement('canvas');
+            maskCanvas.width = w;
+            maskCanvas.height = h;
+            const maskCtx = maskCanvas.getContext('2d');
+            maskCtx.fillStyle = '#000000';
+            maskCtx.fillRect(0, 0, w, h);
+
+            
+            if (result.predictions && result.predictions.length > 0) {
+                maskCtx.fillStyle = '#ffffff';
+
+                result.predictions.forEach(pred => {
+                    // 클래스 이름이 'microbe'인 결과만 골라서 그림
+                    if (pred.class === 'microbe') {
+                        if (pred.points && pred.points.length > 0) {
+                            maskCtx.beginPath();
+                            maskCtx.moveTo(pred.points[0].x, pred.points[0].y);
+                            for (let i = 1; i < pred.points.length; i++) {
+                                maskCtx.lineTo(pred.points[i].x, pred.points[i].y);
+                            }
+                            maskCtx.closePath();
+                            maskCtx.fill();
+                        } else {
+                            // 혹시 다각형이 안 오고 박스 형태로 오더라도 작동하도록 안전장치
+                            maskCtx.beginPath();
+                            maskCtx.ellipse(pred.x, pred.y, pred.width / 2, pred.height / 2, 0, 0, 2 * Math.PI);
+                            maskCtx.fill();
+                        }
+                    }
+                });
+            }
+
+            // 4. 배양 접시 내부 픽셀 면적 계산
+            const procImgData = ctxProc.createImageData(w, h);
+            const procData = procImgData.data;
+            const maskData = maskCtx.getImageData(0, 0, w, h).data;
+
+            let totalDishPixels = 0;
+            let microbePixels = 0;
+
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const idx = (y * w + x) * 4;
+                    const dist = Math.sqrt((x - circle.cx) ** 2 + (y - circle.cy) ** 2);
+
+                    if (dist <= circle.r) {
+                        totalDishPixels++;
+
+                        if (maskData[idx] > 128) {
+                            microbePixels++;
+                            setPixelColor(procData, idx, 255, 50, 50, 255); // 미생물: 빨간색
+                        } else {
+                            setPixelColor(procData, idx, 40, 40, 40, 255);  // 배경: 어두운 회색
+                        }
+                    } else {
+                        setPixelColor(procData, idx, 0, 0, 0, 255); // 접시 바깥: 검은색
+                    }
+                }
+            }
+
+            ctxProc.putImageData(procImgData, 0, 0);
+            updateResults(totalDishPixels, microbePixels);
+
+            modelStatus.innerText = "분석 완료!";
+            modelStatus.style.color = "#27ae60";
+
+        } catch (error) {
+            console.error("Roboflow API 에러:", error);
+            modelStatus.innerText = "분석 중 에러 발생 (콘솔 확인)";
+            modelStatus.style.color = "#e74c3c";
+        } finally {
+            aiBtn.disabled = false;
+        }
+    }
+
+    function drawCircleOverlay() {
         if (circle.r > 0) {
             ctxOrig.strokeStyle = '#00ff00';
             ctxOrig.lineWidth = 2;
@@ -148,55 +277,18 @@
             ctxOrig.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
             ctxOrig.stroke();
         }
+    }
 
-        // 2. 픽셀 데이터 처리
-        const imgData = ctxOrig.getImageData(0, 0, w, h);
-        const data = imgData.data;
-        const procImgData = ctxProc.createImageData(w, h);
-        const procData = procImgData.data;
+    function setPixelColor(dataArray, idx, r, g, b, a) {
+        dataArray[idx] = r;
+        dataArray[idx + 1] = g;
+        dataArray[idx + 2] = b;
+        dataArray[idx + 3] = a;
+    }
 
-        let totalDishPixels = 0;
-        let microbePixels = 0;
-
-        for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w; x++) {
-                const idx = (y * w + x) * 4;
-                const dist = Math.sqrt((x - circle.cx) ** 2 + (y - circle.cy) ** 2);
-
-                if (dist <= circle.r) {
-                    totalDishPixels++;
-
-                    const rCol = data[idx];
-                    const gCol = data[idx + 1];
-                    const bCol = data[idx + 2];
-                    const gray = 0.299 * rCol + 0.587 * gCol + 0.114 * bCol;
-
-                    if (gray > thresVal) {
-                        microbePixels++;
-                        procData[idx] = 255;
-                        procData[idx + 1] = 50;
-                        procData[idx + 2] = 50;
-                        procData[idx + 3] = 255;
-                    } else {
-                        procData[idx] = 40;
-                        procData[idx + 1] = 40;
-                        procData[idx + 2] = 40;
-                        procData[idx + 3] = 255;
-                    }
-                } else {
-                    procData[idx] = 0;
-                    procData[idx + 1] = 0;
-                    procData[idx + 2] = 0;
-                    procData[idx + 3] = 255;
-                }
-            }
-        }
-
-        ctxProc.putImageData(procImgData, 0, 0);
-
-        // 결과 계산 및 업데이트
-        const percent = totalDishPixels > 0 ? (microbePixels / totalDishPixels) * 100 : 0;
-        document.getElementById('totalDishPixels').innerText = totalDishPixels.toLocaleString();
+    function updateResults(totalPixels, microbePixels) {
+        const percent = totalPixels > 0 ? (microbePixels / totalPixels) * 100 : 0;
+        document.getElementById('totalDishPixels').innerText = totalPixels.toLocaleString();
         document.getElementById('microbePixels').innerText = microbePixels.toLocaleString();
         document.getElementById('coveragePercent').innerText = percent.toFixed(2) + " %";
     }
